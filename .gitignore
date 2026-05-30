@@ -1,0 +1,23 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境 (千万不要把几十MB的依赖库传上去)
+.venv/
+venv/
+env/
+
+# 本地数据库 (记忆系统生成的文件)
+*.db
+memory.db
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志和临时文件
+*.log
+notes/
+
+.idea/
