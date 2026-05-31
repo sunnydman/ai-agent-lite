@@ -19,5 +19,6 @@ Thumbs.db
 # 日志和临时文件
 *.log
 notes/
+audio_output/
 
 .idea/
