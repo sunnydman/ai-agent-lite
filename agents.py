@@ -26,14 +26,16 @@ class BaseAgent:
 
 
 class ExecutorAgent(BaseAgent):
+    MAX_ITERATIONS = 5
     def __init__(self, llm_client, agents_md):
         super().__init__("Executor", llm_client)
         self.agents_md = agents_md
         self.tools_desc = self._build_tools_desc()
+        self.system_prompt = self._build_prompt()
 
     def _build_tools_desc(self):
-        tools = [t.spec() for t in TOOL_REGISTRY.values()]
-        return json.dumps(tools, ensure_ascii=False)
+        tools_list = [tool.spec() for tool in TOOL_REGISTRY.values()]
+        return json.dumps(tools_list, ensure_ascii=False, indent=2)
 
     def _build_prompt(self):
         return f"""你是一个强大的 AI 助手。请遵循以下规则：
@@ -227,7 +229,7 @@ Final Answer: 最终回复
         if direct_response:
             return direct_response
 
-        messages = [{"role": "system", "content": self._build_prompt()}]
+        messages = [{"role": "system", "content": self.system_prompt}]
         memory_context = msg.metadata.get("memory_context")
         if memory_context:
             messages.append({"role": "system", "content": f"相关长期记忆:\n{memory_context}"})
@@ -238,7 +240,7 @@ Final Answer: 最终回复
         last_observation = None
         last_action = None
 
-        for i in range(5):
+        for i in range(self.MAX_ITERATIONS):
             trace.append(f"🔄 开始第 {i + 1} 轮推理...")
             try:
                 full_response = self.llm.chat(messages, stream=False)
@@ -354,6 +356,12 @@ class PlannerAgent(BaseAgent):
                 return AgentMessage(self.name, msg.sender, f"回复生成失败: {str(e)}", {"trace": trace, "type": "final"})
 
     def _parse_intent(self, raw: str) -> Tuple[bool, str]:
+        upper = raw.strip().upper()
+        if upper == "YES":
+            return True, ""
+        if upper == "NO":
+            return False, ""
+
         try:
             data = json.loads(raw)
             if isinstance(data, dict):
@@ -366,7 +374,7 @@ class PlannerAgent(BaseAgent):
         except json.JSONDecodeError:
             pass
 
-        upper = raw.upper()
+        # 兼容旧逻辑（如 "YES, I need tool" 仍可能被当作 True）
         return "YES" in upper, ""
 
 
