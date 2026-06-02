@@ -1,0 +1,38 @@
+{
+  "servers": [
+    {
+      "name": "demo",
+      "command": "python",
+      "args": [
+        "demo_mcp_server.py"
+      ],
+      "env": {},
+      "enabled": true,
+      "description": "演示MCP服务器：查天气、统计文件、获取时间"
+    },
+    {
+      "name": "example-filesystem",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/path/to/allowed/directory"
+      ],
+      "env": {},
+      "enabled": false,
+      "description": "文件系统访问 MCP 服务器（需先安装Node.js）"
+    },
+    {
+      "name": "example-fetch",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@anthropic-ai/mcp-server-fetch"
+      ],
+      "env": {},
+      "enabled": false,
+      "description": "网页抓取 MCP 服务器（需先安装Node.js）"
+    }
+  ],
+  "updated_at": "2026-06-02 21:28:36"
+}
