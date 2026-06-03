@@ -2,13 +2,22 @@ import os
 import sys
 import json
 import types
-import tempfile
+import shutil
 import unittest
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+
+TEST_RUNTIME = PROJECT_ROOT / "tests_runtime"
+
+
+def fresh_runtime_dir(name: str) -> Path:
+    path = TEST_RUNTIME / name
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def install_dependency_stubs():
@@ -28,6 +37,7 @@ def install_dependency_stubs():
             return self.value
 
     numexpr = types.ModuleType("numexpr")
+    numexpr.__version__ = "2.10.2"
     numexpr.evaluate = lambda expr: NumResult(eval(expr, {"__builtins__": {}}, {}))
     sys.modules.setdefault("numexpr", numexpr)
 
@@ -72,18 +82,18 @@ class AgentCoreTests(unittest.TestCase):
         self.assertEqual(calculator["parameters"]["required"], ["expression"])
 
     def test_file_writer_rejects_path_outside_workspace(self):
-        with tempfile.TemporaryDirectory() as parent:
-            workspace = Path(parent) / "workspace"
-            workspace.mkdir()
-            old_cwd = os.getcwd()
-            try:
-                os.chdir(workspace)
-                result = FileWriter().run("../outside.txt", "secret")
-            finally:
-                os.chdir(old_cwd)
+        parent = fresh_runtime_dir("file_writer")
+        workspace = parent / "workspace"
+        workspace.mkdir()
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(workspace)
+            result = FileWriter().run("../outside.txt", "secret")
+        finally:
+            os.chdir(old_cwd)
 
-            self.assertIn("拒绝", result)
-            self.assertFalse((Path(parent) / "outside.txt").exists())
+        self.assertIn("拒绝", result)
+        self.assertFalse((parent / "outside.txt").exists())
 
     def test_wiki_search_has_einstein_fallback_when_backend_fails(self):
         old_summary = tools.wikipedia.summary
@@ -200,27 +210,27 @@ class AgentCoreTests(unittest.TestCase):
         self.assertIn("重复工具调用", "\n".join(response.metadata["trace"]))
 
     def test_executor_handles_explicit_write_then_read_without_llm_loop(self):
-        with tempfile.TemporaryDirectory() as workspace:
-            old_cwd = os.getcwd()
-            try:
-                os.chdir(workspace)
-                llm = FakeLLM([])
-                executor = ExecutorAgent(llm, "rules")
+        workspace = fresh_runtime_dir("write_then_read")
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(workspace)
+            llm = FakeLLM([])
+            executor = ExecutorAgent(llm, "rules")
 
-                response = executor.process(
-                    AgentMessage(
-                        "User",
-                        "Executor",
-                        "\u628a\u201chello agent\u201d\u5199\u5165 notes/demo.txt\uff0c\u7136\u540e\u8bfb\u53d6\u8fd9\u4e2a\u6587\u4ef6",
-                    )
+            response = executor.process(
+                AgentMessage(
+                    "User",
+                    "Executor",
+                    "\u628a\u201chello agent\u201d\u5199\u5165 notes/demo.txt\uff0c\u7136\u540e\u8bfb\u53d6\u8fd9\u4e2a\u6587\u4ef6",
                 )
-            finally:
-                os.chdir(old_cwd)
+            )
+        finally:
+            os.chdir(old_cwd)
 
-            self.assertEqual((Path(workspace) / "notes" / "demo.txt").read_text(encoding="utf-8"), "hello agent")
-            self.assertIn("hello agent", response.content)
-            self.assertEqual(len(llm.calls), 0)
-            self.assertNotIn("达到最大循环次数", "\n".join(response.metadata["trace"]))
+        self.assertEqual((workspace / "notes" / "demo.txt").read_text(encoding="utf-8"), "hello agent")
+        self.assertIn("hello agent", response.content)
+        self.assertEqual(len(llm.calls), 0)
+        self.assertNotIn("达到最大循环次数", "\n".join(response.metadata["trace"]))
 
     def test_executor_answers_lifespan_from_wiki_observation_without_looping(self):
         llm = FakeLLM([

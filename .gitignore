@@ -18,6 +18,8 @@ Thumbs.db
 
 # 日志和临时文件
 *.log
+.test_tmp/
+tests_runtime/
 notes/
 audio_output/
 
