@@ -1,11 +1,15 @@
 import os
+import re
 import time
 import uuid
+import json
+import threading
 
 import gradio as gr
 from llm_client import LLMClient
 from agents import OrchestratorAgent, PlannerAgent, ExecutorAgent, AgentMessage
 from memory import MemoryManager
+from mcp_client import MCPManager, MCPServerConfig
 
 try:
     with open("AGENTS.md", "r", encoding="utf-8") as f:
@@ -14,6 +18,10 @@ except FileNotFoundError:
     AGENTS_MD = "未找到 AGENTS.md 文件。"
 
 memory_mgr = MemoryManager()
+
+# 🌐 全局 MCP 管理器
+MCP_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_servers.json")
+mcp_manager = MCPManager.load_configs(MCP_CONFIG_PATH)
 
 # 🌐 全局会话管理器
 ALL_SESSIONS = {}
@@ -346,6 +354,23 @@ body {
     line-height: 1.7 !important;
 }
 
+.mcp-status-card {
+    padding: 8px 12px !important;
+    border-radius: 10px !important;
+    background: #fdf6f0 !important;
+    border: 1px solid rgba(155, 89, 182, 0.18) !important;
+    font-size: 12px !important;
+    line-height: 1.6 !important;
+}
+
+.mcp-server-row {
+    padding: 6px 10px !important;
+    margin: 2px 0 !important;
+    border-radius: 8px !important;
+    background: #fdf6f0 !important;
+    border: 1px solid rgba(193, 95, 63, 0.12) !important;
+}
+
 button.primary,
 button.secondary,
 button {
@@ -563,10 +588,14 @@ def create_session(base_url, api_key, model_name, current_choices):
     if not api_key: api_key = "sk-dummy-local-key"
 
     try:
+        # 确保 MCP 已连接
+        if mcp_manager.get_configs():
+            mcp_manager.connect_all()
+
         llm = LLMClient(api_key=api_key, base_url=base_url, model=model_name)
-        executor = ExecutorAgent(llm, AGENTS_MD)
+        executor = ExecutorAgent(llm, AGENTS_MD, mcp_manager=mcp_manager)
         planner = PlannerAgent(llm, executor)
-        orchestrator = OrchestratorAgent(llm, planner, memory_mgr)
+        orchestrator = OrchestratorAgent(llm, planner, memory_mgr, mcp_manager=mcp_manager)
 
         SESSION_COUNTER += 1
         sid = str(uuid.uuid4())
@@ -657,8 +686,89 @@ def chat_fn(message, history, sid):
     session["history"] = history
 
 
+# ── MCP 管理函数 ───────────────────────────────────────
+
+def mcp_add_server(name, command, args_str, description):
+    """添加 MCP 服务器配置。"""
+    if not name or not command:
+        return gr.update(), "⚠️ 请填写服务器名称和启动命令"
+
+    args = [a.strip() for a in args_str.split() if a.strip()] if args_str else []
+    config = MCPServerConfig(name=name, command=command, args=args, description=description)
+    mcp_manager.add_server(config)
+    mcp_manager.save_configs(MCP_CONFIG_PATH)
+
+    # 尝试连接
+    try:
+        mcp_manager.connect_all()
+    except Exception:
+        pass
+
+    status_text = _build_mcp_status_text()
+    return gr.update(value=""), status_text
+
+
+def mcp_remove_server(server_name):
+    """移除 MCP 服务器配置。"""
+    if not server_name:
+        return _build_mcp_status_text()
+    mcp_manager.remove_server(server_name)
+    mcp_manager.save_configs(MCP_CONFIG_PATH)
+    return _build_mcp_status_text()
+
+
+def mcp_reconnect():
+    """重新连接所有 MCP 服务器并刷新工具。"""
+    mcp_manager.connect_all()
+    # 刷新所有现有 session 的工具
+    for sid, session in ALL_SESSIONS.items():
+        if hasattr(session["orchestrator"], "executor") or hasattr(session["orchestrator"].planner, "executor"):
+            try:
+                orchestrator = session["orchestrator"]
+                # 直接到 executor
+                exec_agent = orchestrator.planner.executor
+                exec_agent._refresh_mcp_tools()
+                exec_agent.tools_desc = exec_agent._build_tools_desc()
+                exec_agent.system_prompt = exec_agent._build_prompt()
+            except Exception:
+                pass
+    return _build_mcp_status_text()
+
+
+def _build_mcp_status_text() -> str:
+    """构建 MCP 状态文本。"""
+    status = mcp_manager.get_server_status()
+    if not status:
+        return "📭 未配置 MCP 服务器\n\n可通过下方表单添加 MCP 服务器来扩展 Agent 能力。"
+    lines = ["**MCP 服务器状态:**\n"]
+    for sname, s in status.items():
+        if s["connected"]:
+            icon = "🟢"
+            info = f"在线 · {s['tool_count']} 个工具"
+        elif s["enabled"]:
+            icon = "🔴"
+            info = "离线"
+        else:
+            icon = "⚫"
+            info = "已禁用"
+        desc = f" — {s['description']}" if s.get("description") else ""
+        lines.append(f"- {icon} **{sname}**: {info}{desc}")
+
+    total_tools = sum(s["tool_count"] for s in status.values())
+    lines.append(f"\n📊 总计 {len(status)} 个服务器, {total_tools} 个远程工具")
+    return "\n".join(lines)
+
+
 def get_status():
-    return f"状态：在线 · 时间：{time.strftime('%H:%M:%S')} · 节点：{len(ALL_SESSIONS)}"
+    mcp_count = len(mcp_manager.get_configs()) if mcp_manager else 0
+    mcp_connected = sum(
+        1 for s in mcp_manager.get_server_status().values() if s.get("connected")
+    ) if mcp_manager else 0
+    return (
+        f"状态：在线 · 时间：{time.strftime('%H:%M:%S')} · "
+        f"节点：{len(ALL_SESSIONS)} · "
+        f"MCP：{mcp_connected}/{mcp_count} 已连接"
+    )
 
 
 with gr.Blocks() as demo:
@@ -714,6 +824,31 @@ with gr.Blocks() as demo:
                 elem_classes="agent-select-card"
             )
             gr.Markdown("---")
+
+            # ── MCP 管理区 ───────────────────────────
+            with gr.Accordion("🔌 MCP 服务器管理", open=False):
+                mcp_status_md = gr.Markdown(
+                    value=_build_mcp_status_text(),
+                    elem_classes="init-status"
+                )
+                with gr.Row():
+                    mcp_reconnect_btn = gr.Button("🔄 重连 MCP", variant="secondary", size="sm")
+                with gr.Row():
+                    mcp_name = gr.Textbox(label="服务器名称", placeholder="如 filesystem", scale=1)
+                    mcp_command = gr.Textbox(label="启动命令", placeholder="如 npx", scale=1)
+                mcp_args = gr.Textbox(label="命令行参数（空格分隔）",
+                                       placeholder='如 -y @modelcontextprotocol/server-filesystem /path')
+                mcp_desc = gr.Textbox(label="描述（可选）", placeholder="简要描述该服务器功能")
+                with gr.Row():
+                    mcp_add_btn = gr.Button("➕ 添加 MCP 服务器", variant="primary", size="sm")
+                mcp_remove_dropdown = gr.Dropdown(
+                    label="移除服务器",
+                    choices=[],
+                    interactive=True,
+                )
+                mcp_remove_btn = gr.Button("🗑 移除选中服务器", variant="secondary", size="sm")
+
+            gr.Markdown("---")
             gr.Markdown("先配置模型，再创建节点。创建后即可在右侧开始对话。",
                         elem_classes="init-status")
 
@@ -760,8 +895,37 @@ with gr.Blocks() as demo:
         [session_dropdown, session_dropdown_bottom, init_status, chatbot, active_sid]
     )
 
+    # ── MCP 事件绑定 ───────────────────────────────
+    def _refresh_mcp_dropdown():
+        configs = mcp_manager.get_configs()
+        return gr.update(choices=[c.name for c in configs], value=None)
+
+    mcp_add_btn.click(
+        mcp_add_server,
+        [mcp_name, mcp_command, mcp_args, mcp_desc],
+        [mcp_name, mcp_status_md]
+    ).then(
+        _refresh_mcp_dropdown, None, [mcp_remove_dropdown]
+    )
+
+    mcp_remove_btn.click(
+        mcp_remove_server,
+        [mcp_remove_dropdown],
+        [mcp_status_md]
+    ).then(
+        _refresh_mcp_dropdown, None, [mcp_remove_dropdown]
+    )
+
+    mcp_reconnect_btn.click(
+        mcp_reconnect, None, [mcp_status_md]
+    ).then(
+        _refresh_mcp_dropdown, None, [mcp_remove_dropdown]
+    )
+
     timer.tick(get_status, None, status_box)
     demo.load(get_status, None, status_box)
+    demo.load(_refresh_mcp_dropdown, None, [mcp_remove_dropdown])
+    demo.load(lambda: _build_mcp_status_text(), None, [mcp_status_md])
 
 if __name__ == "__main__":
     demo.queue().launch(
