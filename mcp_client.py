@@ -313,7 +313,7 @@ class MCPClient:
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
                     "clientInfo": {"name": "ai-agent-lite", "version": "1.1.0"},
-                }, req_id="init-1"
+                }
             ))
             self._server_capabilities = init_result.get("capabilities", {})
 
@@ -349,7 +349,7 @@ class MCPClient:
         if not self._connected:
             raise RuntimeError(f"MCP 服务器 [{self.config.name}] 未连接")
 
-        result = self.transport.send(_rpc_request("tools/list", {}, req_id="tools-list-1"))
+        result = self.transport.send(_rpc_request("tools/list", {}))
         raw_tools = result.get("tools", [])
 
         self._tools.clear()
@@ -384,7 +384,6 @@ class MCPClient:
         result = self.transport.send(_rpc_request(
             "tools/call",
             {"name": tool_name, "arguments": arguments},
-            req_id=f"tool-call-{tool_name}"
         ))
 
         # 提取文本内容
@@ -410,7 +409,7 @@ class MCPClient:
         if not self._connected:
             return []
         try:
-            result = self.transport.send(_rpc_request("resources/list", {}, req_id="res-list-1"))
+            result = self.transport.send(_rpc_request("resources/list", {}))
             return result.get("resources", [])
         except Exception:
             return []
@@ -419,7 +418,7 @@ class MCPClient:
         if not self._connected:
             raise RuntimeError(f"MCP 服务器 [{self.config.name}] 未连接")
         result = self.transport.send(_rpc_request(
-            "resources/read", {"uri": uri}, req_id="res-read-1"
+            "resources/read", {"uri": uri}
         ))
         contents = result.get("contents", [])
         text_parts = []
@@ -470,6 +469,12 @@ class MCPManager:
                 results[name] = False
                 continue
             try:
+                existing = self._clients.get(name)
+                if existing and existing.is_connected:
+                    results[name] = True
+                    continue
+                if existing:
+                    existing.disconnect()
                 client = MCPClient(cfg)
                 client.connect()
                 self._clients[name] = client

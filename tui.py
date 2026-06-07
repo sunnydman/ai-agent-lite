@@ -405,6 +405,7 @@ class TUISession:
         self.session_id = str(uuid.uuid4())
         self.session_name = "TUI-01"
         self.mcp_manager = mcp_manager
+        self.llm_config = dict(llm_config)
 
         # 初始化 LLM
         self.llm = LLMClient(
@@ -567,12 +568,7 @@ def handle_command(cmd: str, session: TUISession, mcp_manager: MCPManager) -> Op
         return "__HANDLED__"
 
     if cmd_lower == "/new":
-        new_session = TUISession(
-            {"base_url": session.llm.client.base_url,
-             "api_key": session.llm.client.api_key,
-             "model_name": session.llm.model},
-            mcp_manager,
-        )
+        new_session = TUISession(session.llm_config, mcp_manager)
         ALL_TUI_SESSIONS[new_session.session_id] = new_session
         TUI_SESSION_COUNTER_REF = len(ALL_TUI_SESSIONS)
         new_session.session_name = f"TUI-{TUI_SESSION_COUNTER_REF:02d}"
@@ -601,7 +597,7 @@ def handle_command(cmd: str, session: TUISession, mcp_manager: MCPManager) -> Op
     shell_match = re.match(r"^/shell\s+(.+)", cmd.strip(), re.IGNORECASE)
     if shell_match:
         nl_input = shell_match.group(1).strip()
-        console.print(Rule("Shell Agent", style=Style(color="#4a90d9")))
+        console.print(Rule("Shell Agent（只读演示模式）", style=Style(color="#4a90d9")))
         console.print(f"  [bold]自然语言:[/bold] {nl_input}", style=STYLE_INFO)
 
         # 第一步: LLM 结构化

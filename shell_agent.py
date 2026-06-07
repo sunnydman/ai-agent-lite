@@ -17,8 +17,9 @@ import re
 import subprocess
 import platform
 import os
-import shlex
 import json
+import time
+import shlex
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Iterator, Tuple
 
@@ -116,12 +117,27 @@ _SAFE_PATHS_UNIX = [
 class SafetyRuleEngine:
     """本地规则引擎 — 纯模式匹配，不依赖 LLM，零延迟。"""
 
+    _READ_ONLY_COMMANDS = {
+        "dir", "type", "find", "findstr", "where",
+        "ls", "cat", "grep", "wc", "pwd", "whoami", "tasklist", "ps",
+    }
+
+    _COMMAND_SEPARATOR_RE = re.compile(r"(&&|\|\||[|><;&`])")
+
     def __init__(self):
         self._rules = _DANGER_RULES
         self._is_windows = platform.system() == "Windows"
 
     def check(self, command: str) -> SafetyVerdict:
         """检查命令是否安全。返回 SafetyVerdict。"""
+        command = (command or "").strip()
+        if not command:
+            return SafetyVerdict(False, "命令为空", [], False)
+
+        read_only_verdict = self._check_read_only_boundary(command)
+        if not read_only_verdict.safe:
+            return read_only_verdict
+
         cmd_lower = command.lower()
         matched_rules = []
         highest_risk = "low"
@@ -139,14 +155,14 @@ class SafetyRuleEngine:
                 safe=False,
                 reason="检测到高风险命令模式",
                 matched_rules=matched_rules,
-                requires_confirmation=True,
+                requires_confirmation=False,
             )
         elif matched_rules and highest_risk == "medium":
             return SafetyVerdict(
                 safe=False,
                 reason="检测到中等风险命令",
                 matched_rules=matched_rules,
-                requires_confirmation=True,
+                requires_confirmation=False,
             )
 
         # 自定义安全目录检查（仅针对文件操作命令）
@@ -160,10 +176,63 @@ class SafetyRuleEngine:
                 safe=False,
                 reason="检测到路径相关风险",
                 matched_rules=matched_rules,
-                requires_confirmation=False,  # 中等风险给个提示但不强制确认
+                requires_confirmation=False,
             )
 
         return SafetyVerdict(safe=True, reason="", matched_rules=[])
+
+    def _check_read_only_boundary(self, command: str) -> SafetyVerdict:
+        """课程演示模式：只允许单条只读查询命令。"""
+        if self._COMMAND_SEPARATOR_RE.search(command):
+            return SafetyVerdict(
+                safe=False,
+                reason="Shell Agent 只允许单条只读命令，禁止连接符、管道和重定向。",
+                matched_rules=["[readonly] command separator or redirection"],
+                requires_confirmation=False,
+            )
+
+        parts = command.split()
+        if not parts:
+            return SafetyVerdict(False, "命令为空", [], False)
+
+        executable = parts[0].strip("\"'").lower()
+        executable = os.path.basename(executable)
+        if executable.endswith(".exe"):
+            executable = executable[:-4]
+
+        if executable not in self._READ_ONLY_COMMANDS:
+            return SafetyVerdict(
+                safe=False,
+                reason="Shell Agent 只允许只读查询命令。",
+                matched_rules=[f"[readonly] command not allowed: {executable}"],
+                requires_confirmation=False,
+            )
+
+        for arg in parts[1:]:
+            cleaned = arg.strip("\"'")
+            if ".." in cleaned.replace("/", "\\").split("\\"):
+                return SafetyVerdict(
+                    safe=False,
+                    reason="Shell Agent 只允许访问当前工作目录内的相对路径。",
+                    matched_rules=[f"[readonly] parent traversal: {cleaned}"],
+                    requires_confirmation=False,
+                )
+            if re.match(r"^[A-Za-z]:\\", cleaned):
+                return SafetyVerdict(
+                    safe=False,
+                    reason="Shell Agent 只允许访问当前工作目录内的相对路径。",
+                    matched_rules=[f"[readonly] absolute path: {cleaned}"],
+                    requires_confirmation=False,
+                )
+            if cleaned.startswith(("/", "~")):
+                return SafetyVerdict(
+                    safe=False,
+                    reason="Shell Agent 只允许访问当前工作目录内的相对路径。",
+                    matched_rules=[f"[readonly] absolute path: {cleaned}"],
+                    requires_confirmation=False,
+                )
+
+        return SafetyVerdict(True, "", [], False)
 
     def _check_path_traversal_unix(self, command: str, matched_rules: List[str]):
         for path_arg in re.findall(r'(?:^|\s)(/(?:[^/\s]+/)*[^/\s]+)', command):
@@ -201,13 +270,43 @@ class ShellCommandExecutor:
         self.max_output_lines = max_output_lines
         self.cwd = cwd or os.getcwd()  # 固定工作目录，避免子进程跑到别处
 
+    def _windows_args(self, command: str):
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            parts = command.split()
+        if not parts:
+            return [self.SHELL_WIN, "/d", "/c", command]
+        executable = os.path.basename(parts[0].strip("\"'")).lower()
+        if executable.endswith(".exe"):
+            executable = executable[:-4]
+        if executable in {"dir", "type"}:
+            return [self.SHELL_WIN, "/d", "/c", command]
+        return parts
+
+    def _terminate_process_tree(self, process: subprocess.Popen, force_tree: bool = False):
+        if platform.system() == "Windows" and force_tree:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                )
+                return
+            except Exception:
+                pass
+        try:
+            process.kill()
+        except Exception:
+            pass
+
     def execute_stream(self, command: str) -> Iterator[str]:
         """流式执行命令，逐行 yield stdout（stderr 合并）。"""
         if platform.system() == "Windows":
             # 使用 Windows 原生编码 cp936（GBK），避免 chcp 65001 不生效导致乱码
             popen_args = {
-                "args": command,
-                "shell": True,
+                "args": self._windows_args(command),
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.STDOUT,
                 "text": True,
@@ -233,30 +332,59 @@ class ShellCommandExecutor:
             yield f"[ShellAgent] 启动失败: {str(e)}"
             return
 
-        lines = 0
+        force_tree_kill = (
+            platform.system() == "Windows"
+            and isinstance(popen_args.get("args"), list)
+            and os.path.basename(str(popen_args["args"][0])).lower() == self.SHELL_WIN.lower()
+        )
+        timed_out = False
+        deadline = time.monotonic() + float(self.timeout)
         try:
-            for line in process.stdout:
-                yield line.rstrip("\n")
-                lines += 1
-                if lines >= self.max_output_lines:
-                    process.kill()
-                    yield f"\n[ShellAgent] 输出超过 {self.max_output_lines} 行，已截断。"
-                    break
+            while process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if process.poll() is None:
+                timed_out = True
+                self._terminate_process_tree(process, force_tree=force_tree_kill)
+            try:
+                output, _ = process.communicate(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                self._terminate_process_tree(process, force_tree=force_tree_kill)
+                try:
+                    output, _ = process.communicate(timeout=0.5)
+                except Exception:
+                    output = ""
+            for line in (output or "").splitlines()[:self.max_output_lines]:
+                yield line
+            if len((output or "").splitlines()) > self.max_output_lines:
+                yield f"[ShellAgent] 输出超过 {self.max_output_lines} 行，已截断。"
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            self._terminate_process_tree(process, force_tree=force_tree_kill)
+            try:
+                output, _ = process.communicate(timeout=1)
+            except Exception:
+                output = ""
+            for line in (output or "").splitlines()[:self.max_output_lines]:
+                yield line
         except Exception as e:
             yield f"[ShellAgent] 读取中断: {str(e)}"
         finally:
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
+            for stream in (process.stdout,):
+                try:
+                    if stream:
+                        stream.close()
+                except Exception:
+                    pass
+        if timed_out:
+            yield f"[ShellAgent] timeout: 命令超时 ({self.timeout}s)，已终止。"
 
     def execute(self, command: str) -> CommandResult:
         """非流式执行，返回完整 CommandResult。"""
 
         if platform.system() == "Windows":
             popen_args = {
-                "args": command,
-                "shell": True,
+                "args": self._windows_args(command),
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
                 "text": True,
@@ -287,10 +415,12 @@ class ShellCommandExecutor:
                 exit_code=process.returncode,
             )
         except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-            except Exception:
-                pass
+            force_tree_kill = (
+                platform.system() == "Windows"
+                and isinstance(popen_args.get("args"), list)
+                and os.path.basename(str(popen_args["args"][0])).lower() == self.SHELL_WIN.lower()
+            )
+            self._terminate_process_tree(process, force_tree=force_tree_kill)
             return CommandResult(
                 success=False,
                 command=command,
@@ -454,12 +584,18 @@ class ShellAgent:
 
         # 合并判断
         needs_confirmation = False
-        if llm_risk == "high":
-            needs_confirmation = True
-        if not local_verdict.safe and local_verdict.requires_confirmation:
-            needs_confirmation = True
-        if llm_risk == "medium" and not local_verdict.safe:
-            needs_confirmation = True
+        if not local_verdict.safe:
+            return local_verdict, False
+        if llm_risk in ("medium", "high"):
+            return (
+                SafetyVerdict(
+                    safe=False,
+                    reason="Shell Agent 只允许只读命令，拒绝执行模型标记为中高风险的命令。",
+                    matched_rules=[f"[readonly] llm risk: {llm_risk}"],
+                    requires_confirmation=False,
+                ),
+                False,
+            )
 
         return local_verdict, needs_confirmation
 
@@ -469,10 +605,10 @@ class ShellAgent:
         """流式执行命令。"""
         yield from self.executor.execute_stream(command)
 
-    def execute(self, command: str) -> CommandResult:
+    def execute(self, command: str, confirmed: bool = False) -> CommandResult:
         """非流式执行。"""
         result = self.executor.execute(command)
-        result.was_confirmed = True
+        result.was_confirmed = confirmed
         return result
 
     # ── 完整流程 ──────────────────────────────────
@@ -499,8 +635,12 @@ class ShellAgent:
             self._pending_confirmation = cmd_info
             return cmd_info, safety_verdict, True, None
 
+        if not safety_verdict.safe:
+            self._pending_confirmation = None
+            return cmd_info, safety_verdict, False, None
+
         # 安全 → 直接执行
-        result = self.execute(cmd_info["command"])
+        result = self.execute(cmd_info["command"], confirmed=False)
         result.risk_level = cmd_info.get("risk_level", "low")
         return cmd_info, safety_verdict, False, result
 
@@ -510,7 +650,7 @@ class ShellAgent:
             return None
         cmd_info = self._pending_confirmation
         self._pending_confirmation = None
-        result = self.execute(cmd_info["command"])
+        result = self.execute(cmd_info["command"], confirmed=True)
         result.risk_level = cmd_info.get("risk_level", "low")
         result.was_confirmed = True
         return result

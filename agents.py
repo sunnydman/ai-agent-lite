@@ -40,6 +40,7 @@ class ExecutorAgent(BaseAgent):
         super().__init__("Executor", llm_client)
         self.agents_md = agents_md
         self.mcp_manager = mcp_manager
+        self.tool_registry = dict(TOOL_REGISTRY)
         self._refresh_mcp_tools()
         self.tools_desc = self._build_tools_desc()
         self.system_prompt = self._build_prompt()
@@ -47,14 +48,9 @@ class ExecutorAgent(BaseAgent):
     def _refresh_mcp_tools(self):
         """刷新 MCP 远程工具注册。每次创建 Executor 时同步一次。"""
         if self.mcp_manager is None:
-            return
-        # 先清理旧的 MCP 工具
-        unregister_mcp_tools(TOOL_REGISTRY)
-        # 重新发现并注册
-        count = register_mcp_tools(self.mcp_manager, TOOL_REGISTRY)
-        if count > 0:
-            from tools import TOOL_REGISTRY as TR
-            # 已在 register_mcp_tools 中直接操作 TOOL_REGISTRY
+            return 0
+        unregister_mcp_tools(self.tool_registry)
+        return register_mcp_tools(self.mcp_manager, self.tool_registry)
 
     def _condense_history(self, history: List[Dict]) -> List[Dict]:
         """把完整对话历史压缩为精简上下文，过滤掉旧轮次的工具 JSON 残片。
@@ -80,7 +76,7 @@ class ExecutorAgent(BaseAgent):
 
 
     def _build_tools_desc(self):
-        tools_list = [tool.spec() for tool in TOOL_REGISTRY.values()]
+        tools_list = [tool.spec() for tool in self.tool_registry.values()]
         return json.dumps(tools_list, ensure_ascii=False, indent=2)
 
     def _build_prompt(self):
@@ -349,7 +345,7 @@ class ExecutorAgent(BaseAgent):
         question_count = self._count_questions(msg.content)
 
         trace.append(f"🧭 检测到人物查询: `{subject}` (问题数≈{question_count})")
-        observation = str(TOOL_REGISTRY["wiki_search"].run(query=subject))
+        observation = str(self.tool_registry["wiki_search"].run(query=subject))
         trace.append(f"👁️ Wiki 返回: {observation[:200]}{'...' if len(observation) > 200 else ''}")
 
         # 纯寿命问题 → 走捷径
@@ -406,9 +402,9 @@ class ExecutorAgent(BaseAgent):
 
         content, path = parsed
         trace.append(f"🧭 检测到明确的写入并读取文件任务，直接调用工具: `{path}`")
-        write_result = str(TOOL_REGISTRY["write_file"].run(path=path, content=content))
+        write_result = str(self.tool_registry["write_file"].run(path=path, content=content))
         trace.append(f"📝 写入结果: {write_result}")
-        read_result = str(TOOL_REGISTRY["read_file"].run(path=path))
+        read_result = str(self.tool_registry["read_file"].run(path=path))
         trace.append(f"📖 读取结果: {read_result[:200]}{'...' if len(read_result) > 200 else ''}")
 
         return AgentMessage(
@@ -495,10 +491,10 @@ class ExecutorAgent(BaseAgent):
                     trace.append(f"📥 **参数**: `{json.dumps(action_input, ensure_ascii=False)}`")
                     yield AgentEvent("tool_call", {"action": action, "input": action_input})
 
-                    if action in TOOL_REGISTRY:
-                        observation = str(TOOL_REGISTRY[action].run(**action_input))
+                    if action in self.tool_registry:
+                        observation = str(self.tool_registry[action].run(**action_input))
                     else:
-                        observation = f"工具 {action} 不存在（可用: {', '.join(list(TOOL_REGISTRY.keys())[:20])}...）"
+                        observation = f"工具 {action} 不存在（可用: {', '.join(list(self.tool_registry.keys())[:20])}...）"
 
                     trace.append(f"👁️ **返回**: {observation[:200]}{'...' if len(observation) > 200 else ''}")
                     yield AgentEvent("tool_result", observation[:500])
@@ -604,8 +600,8 @@ class ExecutorAgent(BaseAgent):
                     trace.append(f"🔧 **调用工具**: `{action}`")
                     trace.append(f"📥 **传入参数**: `{json.dumps(action_input, ensure_ascii=False)}`")
 
-                    if action in TOOL_REGISTRY:
-                        observation = str(TOOL_REGISTRY[action].run(**action_input))
+                    if action in self.tool_registry:
+                        observation = str(self.tool_registry[action].run(**action_input))
                     else:
                         observation = f"工具 {action} 不存在"
 

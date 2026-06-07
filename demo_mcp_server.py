@@ -15,6 +15,23 @@ import datetime
 from pathlib import Path
 
 
+def _workspace_root() -> Path:
+    return Path(os.environ.get("AGENT_WORKSPACE", Path(__file__).resolve().parent)).resolve()
+
+
+def _resolve_workspace_path(directory: str):
+    root = _workspace_root()
+    target = Path(directory or ".").expanduser()
+    if not target.is_absolute():
+        target = root / target
+    target = target.resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None, f"拒绝访问: 路径超出 MCP 演示工作目录 {root}"
+    return target, ""
+
+
 def handle_initialize(params):
     """响应 initialize 请求。"""
     return {
@@ -99,8 +116,10 @@ def handle_tools_call(params):
     elif tool_name == "count_files":
         directory = arguments.get("directory", ".")
         try:
-            path = Path(directory).expanduser().resolve()
-            if not path.exists():
+            path, error = _resolve_workspace_path(directory)
+            if error:
+                text = error
+            elif not path.exists():
                 text = f"目录不存在: {directory}"
             elif not path.is_dir():
                 text = f"路径不是目录: {directory}"

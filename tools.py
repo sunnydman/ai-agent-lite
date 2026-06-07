@@ -245,20 +245,13 @@ class ShellTool(BaseTool):
             return "错误: 命令为空"
 
         verdict = self.safety.check(command.strip())
-        if not verdict.safe and verdict.requires_confirmation:
+        if not verdict.safe:
             return (
                 f"[SECURITY BLOCK] 该命令被本地规则引擎拦截。\n"
                 f"原因: {verdict.reason}\n"
                 f"匹配规则:\n" + "\n".join(f"  • {r}" for r in verdict.matched_rules) +
-                f"\n\n请换用更安全的操作方式，或通过 Shell Agent 模式确认后执行。"
+                f"\n\nShell 工具仅支持只读查询命令，请换用更安全的操作方式。"
             )
-
-        # 只显示匹配的中等风险提示但放行
-        if not verdict.safe:
-            result = self.executor.execute(command.strip())
-            prefix = "⚠️ [提示] 检测到中等风险模式:\n" + \
-                     "\n".join(f"  • {r}" for r in verdict.matched_rules) + "\n\n"
-            return prefix + (result.stdout or result.stderr or "(无输出)")
 
         result = self.executor.execute(command.strip())
         if result.success:

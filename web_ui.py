@@ -4,6 +4,7 @@ import time
 import uuid
 import json
 import threading
+import shlex
 
 import gradio as gr
 from llm_client import LLMClient
@@ -688,12 +689,22 @@ def chat_fn(message, history, sid):
 
 # ── MCP 管理函数 ───────────────────────────────────────
 
+def parse_mcp_args(args_str):
+    """Parse MCP command arguments while preserving quoted paths."""
+    if not args_str or not args_str.strip():
+        return []
+    return [arg.strip("\"'") for arg in shlex.split(args_str, posix=False)]
+
+
 def mcp_add_server(name, command, args_str, description):
     """添加 MCP 服务器配置。"""
     if not name or not command:
         return gr.update(), "⚠️ 请填写服务器名称和启动命令"
 
-    args = [a.strip() for a in args_str.split() if a.strip()] if args_str else []
+    try:
+        args = parse_mcp_args(args_str)
+    except ValueError as exc:
+        return gr.update(), f"⚠️ 参数解析失败: {exc}"
     config = MCPServerConfig(name=name, command=command, args=args, description=description)
     mcp_manager.add_server(config)
     mcp_manager.save_configs(MCP_CONFIG_PATH)
